@@ -1,0 +1,23 @@
+rules_version = '2';
+
+// GBR Bank — regras de segurança do Cloud Firestore.
+//
+// O app conversa com o Firestore SOMENTE pelo Firebase Admin SDK, dentro das
+// rotas de API do Next.js (servidor). O Admin SDK ignora estas regras por
+// design, então o navegador nunca fala direto com o banco.
+//
+// Por isso a política é "porta fechada": nenhum cliente (web, Android, iOS)
+// consegue ler ou escrever diretamente. Quem expõe os dados é a API do
+// próprio GBR Bank, que valida tudo no servidor.
+//
+// Se um dia você adicionar login com Firebase Auth no navegador, troque o
+// `if false` por uma checagem de usuário (ex.: `request.auth != null`) e
+// isole os dados por `profileId == request.auth.uid`.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

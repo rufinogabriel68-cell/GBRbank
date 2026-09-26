@@ -1,21 +1,36 @@
-import { and, eq, sql } from "drizzle-orm";
 import { db } from "@/db";
-import { accounts, transactions } from "@/db/schema";
-import { ensureProfile, jsonError, logAction, optionalDate, positiveAmount } from "@/lib/server";
+import {
+  ensureProfile,
+  fromCents,
+  jsonError,
+  logAction,
+  optionalDate,
+  positiveAmount,
+  safeCents,
+} from "@/lib/server";
+
+export const dynamic = "force-dynamic";
 
 export async function DELETE(_request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
     const profile = await ensureProfile();
-    await db.transaction(async (tx) => {
-      const found = await tx.select().from(transactions).where(and(eq(transactions.id, id), eq(transactions.profileId, profile.id))).limit(1);
-      if (!found[0]) throw new Error("Movimentação não encontrada.");
-      if (found[0].type === "transfer") throw new Error("Exclua transferências pela origem para manter as contas consistentes.");
-      const delta = found[0].type === "income" ? sql`${accounts.balance} - ${found[0].amount}` : sql`${accounts.balance} + ${found[0].amount}`;
-      await tx.update(accounts).set({ balance: delta, updatedAt: new Date() }).where(eq(accounts.id, found[0].accountId));
-      await tx.delete(transactions).where(eq(transactions.id, id));
+
+    const removed = await db.withTransaction(async (tx) => {
+      const current = await tx.findOne("transactions", { id, profileId: profile.id });
+      if (!current) throw new Error("Movimentação não encontrada.");
+      if (current.type === "transfer") throw new Error("Exclua transferências pela origem para manter as contas consistentes.");
+
+      const account = await tx.get("accounts", current.accountId);
+      if (account) {
+        const signed = current.type === "income" ? safeCents(current.amount) : -safeCents(current.amount);
+        await tx.update("accounts", account.id, { balance: fromCents(safeCents(account.balance) - signed), updatedAt: new Date() });
+      }
+      await tx.remove("transactions", id);
+      return current;
     });
-    await logAction(profile.id, "deleted", "transaction", id);
+
+    await logAction(profile.id, "deleted", "transaction", id, { amount: removed.amount });
     return Response.json({ ok: true });
   } catch (error) {
     return jsonError(error);
@@ -27,26 +42,35 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     const { id } = await params;
     const profile = await ensureProfile();
     const body = await request.json();
-    const [current] = await db.select().from(transactions).where(and(eq(transactions.id, id), eq(transactions.profileId, profile.id))).limit(1);
-    if (!current || current.type === "transfer") throw new Error("Movimentação não encontrada ou transferência não editável.");
+    const current = await db.findOne("transactions", { id, profileId: profile.id });
+    if (!current) throw new Error("Movimentação não encontrada.");
+    if (current.type === "transfer") throw new Error("Transferência não é editável: exclua e lance novamente.");
+
     const values: Record<string, unknown> = { updatedAt: new Date() };
     if (body.description !== undefined) values.description = String(body.description);
     if (body.note !== undefined) values.note = body.note ? String(body.note) : null;
-    if (body.occurredAt !== undefined) values.occurredAt = optionalDate(body.occurredAt);
+    if (body.occurredAt !== undefined) values.occurredAt = optionalDate(body.occurredAt) ?? null;
+    if (body.origin !== undefined) values.origin = body.origin === "gbr" ? "gbr" : "personal";
+
     if (body.amount !== undefined) {
       const amount = positiveAmount(body.amount);
-      await db.transaction(async (tx) => {
-        const oldDelta = current.type === "income" ? sql`${accounts.balance} - ${current.amount}` : sql`${accounts.balance} + ${current.amount}`;
-        const newDelta = current.type === "income" ? sql`${accounts.balance} + ${amount}` : sql`${accounts.balance} - ${amount}`;
-        await tx.update(accounts).set({ balance: oldDelta, updatedAt: new Date() }).where(eq(accounts.id, current.accountId));
-        await tx.update(accounts).set({ balance: newDelta, updatedAt: new Date() }).where(eq(accounts.id, current.accountId));
-        await tx.update(transactions).set({ ...values, amount }).where(eq(transactions.id, id));
+      const updated = await db.withTransaction(async (tx) => {
+        const account = await tx.get("accounts", current.accountId);
+        if (account) {
+          const signedBefore = current.type === "income" ? safeCents(current.amount) : -safeCents(current.amount);
+          const signedAfter = current.type === "income" ? safeCents(amount) : -safeCents(amount);
+          const balance = fromCents(safeCents(account.balance) - signedBefore + signedAfter);
+          await tx.update("accounts", account.id, { balance, updatedAt: new Date() });
+        }
+        return tx.update("transactions", id, { ...values, amount });
       });
-    } else {
-      await db.update(transactions).set(values).where(eq(transactions.id, id));
+      await logAction(profile.id, "updated", "transaction", id, { amount });
+      return Response.json(updated ?? current);
     }
+
+    const updated = await db.update("transactions", id, values);
     await logAction(profile.id, "updated", "transaction", id);
-    return Response.json({ ok: true });
+    return Response.json(updated ?? current);
   } catch (error) {
     return jsonError(error);
   }

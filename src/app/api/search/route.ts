@@ -1,19 +1,35 @@
-import { ilike, or, eq } from "drizzle-orm";
 import { db } from "@/db";
-import { debts, goals, receivables, transactions } from "@/db/schema";
-import { ensureProfile, jsonError } from "@/lib/server";
+import { byProfile, ensureProfile, jsonError } from "@/lib/server";
+
+export const dynamic = "force-dynamic";
+
+const LIMIT = 15;
+
+function contains(row: Record<string, unknown>, fields: string[], query: string) {
+  return fields.some((field) => String(row[field] ?? "").toLowerCase().includes(query));
+}
 
 export async function GET(request: Request) {
   try {
-    const profile = await ensureProfile(); const query = new URL(request.url).searchParams.get("q")?.trim();
-    if (!query) return Response.json([]);
-    const pattern = `%${query}%`;
+    const profile = await ensureProfile();
+    const query = new URL(request.url).searchParams.get("q")?.trim().toLowerCase();
+    if (!query) return Response.json({ transactions: [], receivables: [], debts: [], goals: [] });
+
+    const where = byProfile(profile.id);
     const [transactionRows, receivableRows, debtRows, goalRows] = await Promise.all([
-      db.select().from(transactions).where(or(eq(transactions.profileId, profile.id), ilike(transactions.description, pattern))).limit(15),
-      db.select().from(receivables).where(or(eq(receivables.profileId, profile.id), ilike(receivables.person, pattern), ilike(receivables.description, pattern))).limit(15),
-      db.select().from(debts).where(or(eq(debts.profileId, profile.id), ilike(debts.name, pattern), ilike(debts.creditor, pattern))).limit(15),
-      db.select().from(goals).where(or(eq(goals.profileId, profile.id), ilike(goals.name, pattern))).limit(15),
+      db.list("transactions", { where, orderBy: [{ field: "occurredAt", direction: "desc" }] }),
+      db.list("receivables", { where }),
+      db.list("debts", { where }),
+      db.list("goals", { where }),
     ]);
-    return Response.json({ transactions: transactionRows.filter((row) => `${row.description ?? ""}`.toLowerCase().includes(query.toLowerCase())), receivables: receivableRows.filter((row) => `${row.person} ${row.description}`.toLowerCase().includes(query.toLowerCase())), debts: debtRows.filter((row) => `${row.name} ${row.creditor}`.toLowerCase().includes(query.toLowerCase())), goals: goalRows.filter((row) => row.name.toLowerCase().includes(query.toLowerCase())) });
-  } catch (error) { return jsonError(error, 500); }
+
+    return Response.json({
+      transactions: transactionRows.filter((row) => contains(row, ["description", "note"], query)).slice(0, LIMIT),
+      receivables: receivableRows.filter((row) => contains(row, ["person", "description", "note"], query)).slice(0, LIMIT),
+      debts: debtRows.filter((row) => contains(row, ["name", "creditor", "note"], query)).slice(0, LIMIT),
+      goals: goalRows.filter((row) => contains(row, ["name", "note"], query)).slice(0, LIMIT),
+    });
+  } catch (error) {
+    return jsonError(error, 500);
+  }
 }

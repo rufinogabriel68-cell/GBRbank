@@ -1,184 +1,165 @@
-import {
-  boolean,
-  date,
-  index,
-  integer,
-  numeric,
-  pgEnum,
-  pgTable,
-  text,
-  timestamp,
-  uniqueIndex,
-  uuid,
-  varchar,
-} from "drizzle-orm/pg-core";
+/**
+ * Esquema lógico do GBR Bank.
+ *
+ * O banco principal é o Cloud Firestore (Firebase). Este arquivo descreve as
+ * coleções e o tipo de cada campo para que os drivers (Firestore e local)
+ * saibam serializar datas, aplicar padrões e normalizar valores.
+ *
+ * Convenções mantidas da versão PostgreSQL:
+ * - valores monetários são strings com 2 casas ("1234.56"), nunca float;
+ * - campos de data simples (vencimento, prazo) são strings "AAAA-MM-DD";
+ * - campos de data/hora são objetos Date (viram ISO no JSON das APIs).
+ */
 
-const timestamps = {
-  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+export type FieldKind = "string" | "number" | "boolean" | "datetime" | "date" | "money";
+
+export type CollectionSchema = {
+  /** Nome da coleção no Firestore. */
+  name: string;
+  fields: Record<string, FieldKind>;
+  /** Valores aplicados quando o campo não vem no insert. */
+  defaults?: Record<string, string | number | boolean | null>;
 };
 
-export const accountTypeEnum = pgEnum("account_type", ["physical", "digital", "investment", "other"]);
-export const accountStatusEnum = pgEnum("account_status", ["active", "archived"]);
-export const transactionTypeEnum = pgEnum("transaction_type", ["income", "expense", "transfer"]);
-export const categoryKindEnum = pgEnum("category_kind", ["income", "expense"]);
-export const originEnum = pgEnum("origin", ["personal", "gbr"]);
-export const receivableStatusEnum = pgEnum("receivable_status", ["pending", "partial", "received", "overdue"]);
-export const debtStatusEnum = pgEnum("debt_status", ["pending", "partial", "paid", "overdue"]);
-export const billStatusEnum = pgEnum("bill_status", ["pending", "paid", "overdue"]);
+/**
+ * O painel é de uso pessoal e abre direto no dashboard (sem tela de login),
+ * então existe um único perfil, com id fixo. Isso evita perfis duplicados em
+ * requisições simultâneas e facilita as regras de segurança.
+ */
+export const DEFAULT_PROFILE_ID = "default";
 
-export const profiles = pgTable("profiles", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  username: varchar("username", { length: 80 }).notNull().default("admin"),
-  name: varchar("name", { length: 120 }).notNull().default("Gabriel"),
-  email: varchar("email", { length: 180 }).notNull().default("admin@gbrbank.local"),
-  avatarUrl: text("avatar_url"),
-  ...timestamps,
-}, (table) => ({ usernameIdx: uniqueIndex("profiles_username_idx").on(table.username) }));
+const stamps = { createdAt: "datetime", updatedAt: "datetime" } as const;
 
-export const accounts = pgTable("accounts", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  profileId: uuid("profile_id").notNull().references(() => profiles.id, { onDelete: "cascade" }),
-  name: varchar("name", { length: 100 }).notNull(),
-  type: accountTypeEnum("type").notNull().default("digital"),
-  balance: numeric("balance", { precision: 14, scale: 2 }).notNull().default("0"),
-  description: text("description"),
-  status: accountStatusEnum("status").notNull().default("active"),
-  ...timestamps,
-}, (table) => ({ profileIdx: index("accounts_profile_idx").on(table.profileId), statusIdx: index("accounts_status_idx").on(table.status) }));
+export const collections = {
+  profiles: {
+    name: "profiles",
+    fields: { id: "string", username: "string", name: "string", email: "string", avatarUrl: "string", ...stamps },
+    defaults: { username: "admin", name: "Gabriel", email: "admin@gbrbank.local", avatarUrl: null },
+  },
+  accounts: {
+    name: "accounts",
+    fields: { id: "string", profileId: "string", name: "string", type: "string", balance: "money", description: "string", status: "string", ...stamps },
+    defaults: { type: "digital", balance: "0.00", description: null, status: "active" },
+  },
+  categories: {
+    name: "categories",
+    fields: { id: "string", profileId: "string", name: "string", kind: "string", color: "string", isDefault: "boolean", ...stamps },
+    defaults: { color: "#8b9bb4", isDefault: false },
+  },
+  transfers: {
+    name: "transfers",
+    fields: { id: "string", profileId: "string", fromAccountId: "string", toAccountId: "string", amount: "money", occurredAt: "datetime", description: "string", ...stamps },
+    defaults: { description: null },
+  },
+  transactions: {
+    name: "transactions",
+    fields: { id: "string", profileId: "string", accountId: "string", categoryId: "string", transferId: "string", type: "string", amount: "money", occurredAt: "datetime", description: "string", note: "string", origin: "string", ...stamps },
+    defaults: { categoryId: null, transferId: null, description: null, note: null, origin: "personal" },
+  },
+  receivables: {
+    name: "receivables",
+    fields: { id: "string", profileId: "string", person: "string", description: "string", originalAmount: "money", dueDate: "date", status: "string", note: "string", ...stamps },
+    defaults: { dueDate: null, status: "pending", note: null },
+  },
+  receivable_payments: {
+    name: "receivable_payments",
+    fields: { id: "string", profileId: "string", receivableId: "string", accountId: "string", transactionId: "string", amount: "money", paidAt: "datetime", ...stamps },
+    defaults: { transactionId: null },
+  },
+  debts: {
+    name: "debts",
+    fields: { id: "string", profileId: "string", name: "string", creditor: "string", category: "string", originalAmount: "money", installments: "number", installmentAmount: "money", nextDueDate: "date", status: "string", note: "string", ...stamps },
+    defaults: { category: "Outros", installments: null, installmentAmount: null, nextDueDate: null, status: "pending", note: null },
+  },
+  debt_payments: {
+    name: "debt_payments",
+    fields: { id: "string", profileId: "string", debtId: "string", accountId: "string", transactionId: "string", amount: "money", paidAt: "datetime", ...stamps },
+    defaults: { transactionId: null },
+  },
+  bills: {
+    name: "bills",
+    fields: { id: "string", profileId: "string", name: "string", amount: "money", dueDate: "date", recurrence: "string", category: "string", status: "string", ...stamps },
+    defaults: { recurrence: "none", category: "Outros", status: "pending" },
+  },
+  goals: {
+    name: "goals",
+    fields: { id: "string", profileId: "string", name: "string", targetAmount: "money", currentAmount: "money", deadline: "date", category: "string", note: "string", ...stamps },
+    defaults: { currentAmount: "0.00", deadline: null, category: "Outros", note: null },
+  },
+  personal_settlement: {
+    name: "personal_settlement",
+    fields: { id: "string", profileId: "string", targetAmount: "money", savedAmount: "money", ...stamps },
+    defaults: { targetAmount: "0.00", savedAmount: "0.00" },
+  },
+  settings: {
+    name: "settings",
+    fields: { id: "string", profileId: "string", currency: "string", locale: "string", theme: "string", ...stamps },
+    defaults: { currency: "BRL", locale: "pt-BR", theme: "dark" },
+  },
+  audit_logs: {
+    name: "audit_logs",
+    fields: { id: "string", profileId: "string", action: "string", entity: "string", entityId: "string", metadata: "string", ...stamps },
+    defaults: { entityId: null, metadata: null },
+  },
+} satisfies Record<string, CollectionSchema>;
 
-export const categories = pgTable("categories", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  profileId: uuid("profile_id").notNull().references(() => profiles.id, { onDelete: "cascade" }),
-  name: varchar("name", { length: 80 }).notNull(),
-  kind: categoryKindEnum("kind").notNull(),
-  color: varchar("color", { length: 20 }).notNull().default("#8b9bb4"),
-  isDefault: boolean("is_default").notNull().default(false),
-  ...timestamps,
-}, (table) => ({ profileKindIdx: index("categories_profile_kind_idx").on(table.profileId, table.kind) }));
+export type CollectionKey = keyof typeof collections;
 
-export const transfers = pgTable("transfers", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  profileId: uuid("profile_id").notNull().references(() => profiles.id, { onDelete: "cascade" }),
-  fromAccountId: uuid("from_account_id").notNull().references(() => accounts.id),
-  toAccountId: uuid("to_account_id").notNull().references(() => accounts.id),
-  amount: numeric("amount", { precision: 14, scale: 2 }).notNull(),
-  occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().defaultNow(),
-  description: text("description"),
-  ...timestamps,
-}, (table) => ({ profileDateIdx: index("transfers_profile_date_idx").on(table.profileId, table.occurredAt) }));
+export const collectionKeys = Object.keys(collections) as CollectionKey[];
 
-export const transactions = pgTable("transactions", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  profileId: uuid("profile_id").notNull().references(() => profiles.id, { onDelete: "cascade" }),
-  accountId: uuid("account_id").notNull().references(() => accounts.id),
-  categoryId: uuid("category_id").references(() => categories.id, { onDelete: "set null" }),
-  transferId: uuid("transfer_id").references(() => transfers.id, { onDelete: "set null" }),
-  type: transactionTypeEnum("type").notNull(),
-  amount: numeric("amount", { precision: 14, scale: 2 }).notNull(),
-  occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().defaultNow(),
-  description: text("description"),
-  note: text("note"),
-  origin: originEnum("origin").notNull().default("personal"),
-  ...timestamps,
-}, (table) => ({ profileDateIdx: index("transactions_profile_date_idx").on(table.profileId, table.occurredAt), accountIdx: index("transactions_account_idx").on(table.accountId), categoryIdx: index("transactions_category_idx").on(table.categoryId) }));
+/** Campos de data/hora de uma coleção (usado para serializar/reviver). */
+export function datetimeFields(key: CollectionKey) {
+  return Object.entries(collections[key].fields)
+    .filter(([, kind]) => kind === "datetime")
+    .map(([field]) => field);
+}
 
-export const receivables = pgTable("receivables", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  profileId: uuid("profile_id").notNull().references(() => profiles.id, { onDelete: "cascade" }),
-  person: varchar("person", { length: 140 }).notNull(),
-  description: text("description").notNull(),
-  originalAmount: numeric("original_amount", { precision: 14, scale: 2 }).notNull(),
-  dueDate: date("due_date"),
-  status: receivableStatusEnum("status").notNull().default("pending"),
-  note: text("note"),
-  ...timestamps,
-}, (table) => ({ profileStatusIdx: index("receivables_profile_status_idx").on(table.profileId, table.status), dueDateIdx: index("receivables_due_date_idx").on(table.dueDate) }));
+export function collectionNameOf(collection: string): string {
+  const found = collectionKeys.find((key) => collections[key].name === collection || key === collection);
+  if (!found) throw new Error(`Coleção desconhecida: ${collection}`);
+  return collections[found].name;
+}
 
-export const receivablePayments = pgTable("receivable_payments", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  profileId: uuid("profile_id").notNull().references(() => profiles.id, { onDelete: "cascade" }),
-  receivableId: uuid("receivable_id").notNull().references(() => receivables.id, { onDelete: "cascade" }),
-  accountId: uuid("account_id").notNull().references(() => accounts.id),
-  transactionId: uuid("transaction_id").references(() => transactions.id, { onDelete: "set null" }),
-  amount: numeric("amount", { precision: 14, scale: 2 }).notNull(),
-  paidAt: timestamp("paid_at", { withTimezone: true }).notNull().defaultNow(),
-  ...timestamps,
-}, (table) => ({ receivableIdx: index("receivable_payments_receivable_idx").on(table.receivableId) }));
+export function getCollectionSchema(name: string): CollectionSchema {
+  const found = collectionKeys.find((key) => collections[key].name === name || key === name);
+  if (!found) throw new Error(`Coleção desconhecida: ${name}`);
+  return collections[found];
+}
 
-export const debts = pgTable("debts", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  profileId: uuid("profile_id").notNull().references(() => profiles.id, { onDelete: "cascade" }),
-  name: varchar("name", { length: 140 }).notNull(),
-  creditor: varchar("creditor", { length: 140 }).notNull(),
-  category: varchar("category", { length: 80 }).notNull().default("Outros"),
-  originalAmount: numeric("original_amount", { precision: 14, scale: 2 }).notNull(),
-  installments: integer("installments"),
-  installmentAmount: numeric("installment_amount", { precision: 14, scale: 2 }),
-  nextDueDate: date("next_due_date"),
-  status: debtStatusEnum("status").notNull().default("pending"),
-  note: text("note"),
-  ...timestamps,
-}, (table) => ({ profileStatusIdx: index("debts_profile_status_idx").on(table.profileId, table.status), dueDateIdx: index("debts_due_date_idx").on(table.nextDueDate) }));
+export function collectionKeyOf(name: string): CollectionKey {
+  const found = collectionKeys.find((key) => collections[key].name === name || key === name);
+  if (!found) throw new Error(`Coleção desconhecida: ${name}`);
+  return found;
+}
 
-export const debtPayments = pgTable("debt_payments", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  profileId: uuid("profile_id").notNull().references(() => profiles.id, { onDelete: "cascade" }),
-  debtId: uuid("debt_id").notNull().references(() => debts.id, { onDelete: "cascade" }),
-  accountId: uuid("account_id").notNull().references(() => accounts.id),
-  transactionId: uuid("transaction_id").references(() => transactions.id, { onDelete: "set null" }),
-  amount: numeric("amount", { precision: 14, scale: 2 }).notNull(),
-  paidAt: timestamp("paid_at", { withTimezone: true }).notNull().defaultNow(),
-  ...timestamps,
-}, (table) => ({ debtIdx: index("debt_payments_debt_idx").on(table.debtId) }));
+/* ------------------------------------------------------------------ */
+/* Tipos das linhas retornadas pelas APIs                              */
+/* ------------------------------------------------------------------ */
 
-export const bills = pgTable("bills", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  profileId: uuid("profile_id").notNull().references(() => profiles.id, { onDelete: "cascade" }),
-  name: varchar("name", { length: 140 }).notNull(),
-  amount: numeric("amount", { precision: 14, scale: 2 }).notNull(),
-  dueDate: date("due_date").notNull(),
-  recurrence: varchar("recurrence", { length: 30 }).notNull().default("none"),
-  category: varchar("category", { length: 80 }).notNull().default("Outros"),
-  status: billStatusEnum("status").notNull().default("pending"),
-  ...timestamps,
-}, (table) => ({ profileStatusIdx: index("bills_profile_status_idx").on(table.profileId, table.status), dueDateIdx: index("bills_due_date_idx").on(table.dueDate) }));
+export type Money = string | number;
 
-export const goals = pgTable("goals", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  profileId: uuid("profile_id").notNull().references(() => profiles.id, { onDelete: "cascade" }),
-  name: varchar("name", { length: 140 }).notNull(),
-  targetAmount: numeric("target_amount", { precision: 14, scale: 2 }).notNull(),
-  currentAmount: numeric("current_amount", { precision: 14, scale: 2 }).notNull().default("0"),
-  deadline: date("deadline"),
-  category: varchar("category", { length: 80 }).notNull().default("Outros"),
-  note: text("note"),
-  ...timestamps,
-}, (table) => ({ profileIdx: index("goals_profile_idx").on(table.profileId) }));
+type Base = { id: string; profileId: string; createdAt: Date; updatedAt: Date };
 
-export const personalSettlement = pgTable("personal_settlement", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  profileId: uuid("profile_id").notNull().references(() => profiles.id, { onDelete: "cascade" }),
-  targetAmount: numeric("target_amount", { precision: 14, scale: 2 }).notNull().default("0"),
-  savedAmount: numeric("saved_amount", { precision: 14, scale: 2 }).notNull().default("0"),
-  ...timestamps,
-}, (table) => ({ profileUniqueIdx: uniqueIndex("personal_settlement_profile_idx").on(table.profileId) }));
+export type Profile = { id: string; username: string; name: string; email: string; avatarUrl: string | null; createdAt: Date; updatedAt: Date };
+export type Account = Base & { name: string; type: "physical" | "digital" | "investment" | "other" | string; balance: Money; description: string | null; status: "active" | "archived" | string };
+export type Category = Base & { name: string; kind: "income" | "expense" | string; color: string; isDefault: boolean };
+export type Transfer = Base & { fromAccountId: string; toAccountId: string; amount: Money; occurredAt: Date; description: string | null };
+export type Transaction = Base & { accountId: string; categoryId: string | null; transferId: string | null; type: "income" | "expense" | "transfer" | string; amount: Money; occurredAt: Date; description: string | null; note: string | null; origin: "personal" | "gbr" | string };
+export type Receivable = Base & { person: string; description: string; originalAmount: Money; dueDate: string | null; status: string; note: string | null };
+export type ReceivablePayment = Base & { receivableId: string; accountId: string; transactionId: string | null; amount: Money; paidAt: Date };
+export type Debt = Base & { name: string; creditor: string; category: string; originalAmount: Money; installments: number | null; installmentAmount: Money | null; nextDueDate: string | null; status: string; note: string | null };
+export type DebtPayment = Base & { debtId: string; accountId: string; transactionId: string | null; amount: Money; paidAt: Date };
+export type Bill = Base & { name: string; amount: Money; dueDate: string; recurrence: string; category: string; status: string };
+export type Goal = Base & { name: string; targetAmount: Money; currentAmount: Money; deadline: string | null; category: string; note: string | null };
+export type PersonalSettlement = Base & { targetAmount: Money; savedAmount: Money };
+export type SettingsRow = Base & { currency: string; locale: string; theme: string };
+export type AuditLog = Base & { action: string; entity: string; entityId: string | null; metadata: string | null };
 
-export const settings = pgTable("settings", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  profileId: uuid("profile_id").notNull().references(() => profiles.id, { onDelete: "cascade" }),
-  currency: varchar("currency", { length: 8 }).notNull().default("BRL"),
-  locale: varchar("locale", { length: 20 }).notNull().default("pt-BR"),
-  theme: varchar("theme", { length: 20 }).notNull().default("dark"),
-  ...timestamps,
-}, (table) => ({ profileUniqueIdx: uniqueIndex("settings_profile_idx").on(table.profileId) }));
-
-export const auditLogs = pgTable("audit_logs", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  profileId: uuid("profile_id").notNull().references(() => profiles.id, { onDelete: "cascade" }),
-  action: varchar("action", { length: 80 }).notNull(),
-  entity: varchar("entity", { length: 80 }).notNull(),
-  entityId: uuid("entity_id"),
-  metadata: text("metadata"),
-  ...timestamps,
-}, (table) => ({ profileDateIdx: index("audit_logs_profile_date_idx").on(table.profileId, table.createdAt) }));
+export const accountTypes = ["physical", "digital", "investment", "other"] as const;
+export const accountStatuses = ["active", "archived"] as const;
+export const transactionTypes = ["income", "expense", "transfer"] as const;
+export const categoryKinds = ["income", "expense"] as const;
+export const origins = ["personal", "gbr"] as const;
+export const receivableStatuses = ["pending", "partial", "received", "overdue"] as const;
+export const debtStatuses = ["pending", "partial", "paid", "overdue"] as const;
+export const billStatuses = ["pending", "paid", "overdue"] as const;
